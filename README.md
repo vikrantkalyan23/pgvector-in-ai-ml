@@ -280,3 +280,88 @@ SELECT * FROM pg_extension WHERE extname = 'vector';
 ```
 
 **Docs:** https://github.com/pgvector/pgvector
+
+---
+
+## Part 8: Use of pgvector on Docker
+
+The pgvector Docker image includes PostgreSQL and the extension files, which makes it useful for local development and repeatable deployments.
+
+### Start with Docker Compose
+
+Create a `docker-compose.yml` file:
+
+```yaml
+services:
+  postgres:
+    image: pgvector/pgvector:pg18-trixie
+    container_name: pgvector-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: vectordb
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgvector_data:/var/lib/postgresql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d vectordb"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+volumes:
+  pgvector_data:
+```
+
+Start PostgreSQL and connect to it:
+
+```bash
+docker compose up -d
+docker compose exec postgres psql -U postgres -d vectordb
+```
+
+Enable pgvector in the database:
+
+```sql
+CREATE EXTENSION IF NOT EXISTS vector;
+
+CREATE TABLE documents (
+  id bigserial PRIMARY KEY,
+  content text NOT NULL,
+  embedding vector(3) NOT NULL
+);
+
+INSERT INTO documents (content, embedding) VALUES
+  ('Postgres vector search', '[1,2,3]'),
+  ('AI similarity search', '[1,1,1]');
+
+SELECT id, content, embedding <=> '[1,2,3]' AS cosine_distance
+FROM documents
+ORDER BY cosine_distance
+LIMIT 5;
+```
+
+Use the dimension required by your embedding model in a real application, such as `vector(1536)`, instead of the small demonstration dimension.
+
+### Production-level steps
+
+1. **Pin image and model versions.** Use an explicit pgvector image version instead of `latest`, and pin the embedding model so vector dimensions and semantics do not change unexpectedly.
+2. **Use durable storage.** Mount `/var/lib/postgresql` for PostgreSQL 18 images and verify that data survives container replacement.
+3. **Protect credentials.** Store passwords in Docker secrets or a cloud secret manager, never directly in a committed Compose file.
+4. **Restrict network access.** Keep PostgreSQL on a private network and do not publish port `5432` to the public internet.
+5. **Design the schema for filtering.** Add tenant, metadata, and timestamp columns, then create normal B-tree or GIN indexes for frequently used filters.
+6. **Create the vector index after bulk loading.** For example:
+
+   ```sql
+   CREATE INDEX documents_embedding_hnsw_idx
+   ON documents
+   USING hnsw (embedding vector_cosine_ops);
+   ```
+
+7. **Match the index to the distance operator.** Use `vector_cosine_ops` with `<=>`, `vector_l2_ops` with `<->`, or `vector_ip_ops` with `<#>`.
+8. **Measure query behavior.** Check production-like queries with `EXPLAIN (ANALYZE, BUFFERS)` and tune HNSW recall with `hnsw.ef_search` when needed.
+9. **Plan capacity and maintenance.** Monitor CPU, memory, disk I/O, table size, index size, autovacuum, query latency, and connection-pool usage.
+10. **Back up and test recovery.** Configure regular backups, point-in-time recovery, restore drills, and replication or high availability for critical workloads.
+11. **Prefer managed PostgreSQL for critical systems.** A provider with pgvector support can handle patching, backups, monitoring, failover, and storage growth more reliably than a single Docker host.
